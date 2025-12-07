@@ -1,5 +1,15 @@
 # go Connect Template CLI
 
+template: github.com/sunmery/connect-example-fast.git
+
+- golang
+- sqlc
+- otel
+- connectrpc/connect
+- buf
+- protobuf
+- consul
+
 # Start
 
 - new project

@@ -76,17 +76,9 @@ func handleNewCommand() {
 
 	// 根据--nomod参数执行不同的逻辑
 	if nomod {
-		// 大仓模式：计算完整的模块路径，包括当前目录名称
-		currentDir, err := os.Getwd()
-		if err != nil {
-			fmt.Printf("Failed to get current directory: %v\n", err)
-			os.Exit(1)
-		}
-		rootDirName := filepath.Base(currentDir)
-		fullModulePath := rootDirName + "/" + appPath
-
+		// 大仓模式：直接使用appPath，在handleMonorepoMode中计算完整模块路径
 		// 大仓模式
-		if err := handleMonorepoMode(targetPath, fullModulePath, appName); err != nil {
+		if err := handleMonorepoMode(targetPath, appPath, appName); err != nil {
 			fmt.Printf("Failed to handle monorepo mode: %v\n", err)
 			os.Exit(1)
 		}
@@ -222,8 +214,8 @@ func generateProtoContent(protoPath string) string {
 	pkgName := pathParts[len(pathParts)-2]
 	serviceName := strings.TrimSuffix(pathParts[len(pathParts)-1], ".proto")
 
-	// 生成go_package
-	goPkg := fmt.Sprintf("%s/%s/%s/%s;%s", pathParts[len(pathParts)-3], pkgName, serviceName, serviceName, serviceName)
+	// 生成go_package，使用相对路径
+	goPkg := fmt.Sprintf("./%s/%s/%s;%s", strings.Join(pathParts[:len(pathParts)-1], "/"), serviceName, serviceName, serviceName)
 
 	// 生成proto文件内容
 	return fmt.Sprintf(`syntax = "proto3";
@@ -288,6 +280,58 @@ func generateProtoServer(protoPath, targetDir string) error {
 	// 生成服务代码
 	serverCode := generateServerCode(protoPath, serviceName)
 
+	// 替换{{.AppModule}}为实际的应用模块路径
+	// 1. 获取当前目录的go.mod文件，提取根模块名
+	rootDir, _ := os.Getwd()
+	rootModuleName := ""
+
+	// 查找go.mod文件，从当前目录向上查找
+	currentDir := rootDir
+	for i := 0; i < 5; i++ { // 最多向上查找5层
+		goModPath := filepath.Join(currentDir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			// 找到go.mod文件，提取模块名
+			goModData, err := os.ReadFile(goModPath)
+			if err == nil {
+				rootModuleName = extractModuleName(string(goModData))
+				break
+			}
+		}
+		// 向上一级目录查找
+		currentDir = filepath.Dir(currentDir)
+	}
+
+	// 2. 构建应用模块路径
+	appModule := rootModuleName
+	if appModule != "" {
+		// 从当前目录中提取应用相对路径，只包含从application开始的部分
+		relPath, err := filepath.Rel(currentDir, rootDir)
+		if err == nil {
+			// 如果当前目录是根目录的子目录，添加相对路径
+			if relPath != "." {
+				// 检查relPath是否包含application目录
+				if strings.Contains(relPath, "application") {
+					// 只保留从application开始的部分
+					pathParts := strings.Split(relPath, "/")
+					appIndex := -1
+					for i, part := range pathParts {
+						if part == "application" {
+							appIndex = i
+							break
+						}
+					}
+					if appIndex != -1 {
+						relPath = strings.Join(pathParts[appIndex:], "/")
+					}
+				}
+				appModule = appModule + "/" + relPath
+			}
+		}
+	}
+
+	// 3. 替换模板变量
+	serverCode = strings.ReplaceAll(serverCode, "{{.AppModule}}", appModule)
+
 	// 写入文件
 	targetFile := filepath.Join(targetDir, strings.ToLower(serviceName)+"_service.go")
 	return os.WriteFile(targetFile, []byte(serverCode), 0644)
@@ -301,35 +345,31 @@ func generateServerCode(protoPath, serviceName string) string {
 		return "" // 无效路径
 	}
 
-	// 提取包名和服务名
-	pkgName := pathParts[len(pathParts)-2]
+	// 提取服务名
 	serviceNameLower := strings.ToLower(serviceName)
-	pbPkg := fmt.Sprintf("%s/%s/%s", pathParts[len(pathParts)-3], pkgName, serviceNameLower)
-	connectPkg := fmt.Sprintf("%s/%s/%s/%sconnect", pathParts[len(pathParts)-3], pkgName, serviceNameLower, serviceNameLower)
 
-	// 生成服务代码，只包含必要部分
+	// 生成简化的服务代码，只包含必要部分
 	return fmt.Sprintf(`package service
 
 import (
     "context"
-
-    pb "%s"
-    %sconnect "%s"
-
     "connectrpc.com/connect"
-    "%s/internal/biz"
+    "{{.AppModule}}/internal/biz"
+    pb "{{.AppModule}}/%s"
+    %sconnect "{{.AppModule}}/%s/%sconnect"
 )
 
 // %sService 实现 Connect 服务
-type %sService struct {
+ type %sService struct {
     // 业务逻辑依赖
     uc *biz.%sUseCase
-}
+ }
 
 // 显式接口检查
-var _ %sconnect.%sServiceHandler = (*%sService)(nil)
+ var _ %sconnect.%sServiceHandler = (*%sService)(nil)
 `,
-		pbPkg, serviceNameLower, connectPkg, pathParts[len(pathParts)-3],
+		strings.Join(pathParts[:len(pathParts)-1], "/"),
+		serviceNameLower, strings.Join(pathParts[:len(pathParts)-1], "/"), serviceNameLower,
 		serviceName, serviceName, serviceName,
 		serviceNameLower, serviceName, serviceName,
 	)
@@ -431,10 +471,31 @@ func updateProtoFiles(root, oldModule, newModule string) error {
 }
 
 // handleMonorepoMode 处理大仓模式的逻辑
-func handleMonorepoMode(targetPath, fullModulePath, appName string) error {
-	fmt.Printf("Entering monorepo mode for %s with module path %s\n", targetPath, fullModulePath)
+func handleMonorepoMode(targetPath, appPath, appName string) error {
+	fmt.Printf("Entering monorepo mode for %s with app path %s\n", targetPath, appPath)
 
-	// 1. 重命名cmd/server目录为cmd/<appName>
+	// 1. 获取根目录的go.mod文件内容，提取module名称
+	rootDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get root directory: %w", err)
+	}
+
+	rootGoModPath := filepath.Join(rootDir, "go.mod")
+	rootGoModData, err := os.ReadFile(rootGoModPath)
+	if err != nil {
+		return fmt.Errorf("failed to read root go.mod: %w", err)
+	}
+
+	// 解析根目录go.mod的module名称
+	rootModuleName := extractModuleName(string(rootGoModData))
+	fmt.Printf("Root module name: %s\n", rootModuleName)
+
+	// 2. 计算完整的import路径，使用根目录的module名称
+	// 直接使用appPath构建完整的import路径，避免重复的backend目录
+	fullImportPath := fmt.Sprintf("%s/%s", rootModuleName, appPath)
+	fmt.Printf("Full import path: %s\n", fullImportPath)
+
+	// 3. 重命名cmd/server目录为cmd/<appName>
 	oldCmdPath := filepath.Join(targetPath, "cmd", "server")
 	newCmdPath := filepath.Join(targetPath, "cmd", appName)
 	if err := os.Rename(oldCmdPath, newCmdPath); err != nil {
@@ -442,7 +503,7 @@ func handleMonorepoMode(targetPath, fullModulePath, appName string) error {
 	}
 	fmt.Printf("Renamed cmd/server to cmd/%s\n", appName)
 
-	// 2. 删除生成的go.mod和go.sum文件
+	// 4. 删除生成的go.mod和go.sum文件
 	goModPath := filepath.Join(targetPath, "go.mod")
 	if err := os.Remove(goModPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -459,7 +520,7 @@ func handleMonorepoMode(targetPath, fullModulePath, appName string) error {
 	}
 	fmt.Printf("Removed go.sum file\n")
 
-	// 3. 删除生成的api目录
+	// 5. 删除生成的api目录
 	apiPath := filepath.Join(targetPath, "api")
 	if err := os.RemoveAll(apiPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -468,13 +529,13 @@ func handleMonorepoMode(targetPath, fullModulePath, appName string) error {
 	}
 	fmt.Printf("Removed api directory\n")
 
-	// 4. 修改所有go文件中的import路径，使用完整路径
-	if err := updateGoFilesForMonorepo(targetPath, "connect-go-example", fullModulePath); err != nil {
+	// 6. 修改所有go文件中的import路径，使用根目录的module名称
+	if err := updateGoFilesForMonorepo(targetPath, "connect-go-example", fullImportPath); err != nil {
 		return fmt.Errorf("failed to update go files: %w", err)
 	}
 	fmt.Printf("Updated import paths in go files\n")
 
-	// 5. 确保main.go中有必要的import
+	// 7. 确保main.go中有必要的import
 	mainFilePath := filepath.Join(newCmdPath, "main.go")
 	if err := ensureMainImports(mainFilePath, appName); err != nil {
 		return fmt.Errorf("failed to update main.go imports: %w", err)
@@ -482,6 +543,18 @@ func handleMonorepoMode(targetPath, fullModulePath, appName string) error {
 	fmt.Printf("Ensured main.go imports\n")
 
 	return nil
+}
+
+// extractModuleName 从go.mod内容中提取module名称
+func extractModuleName(goModContent string) string {
+	// 使用正则表达式匹配module名称
+	moduleRegex := regexp.MustCompile(`module\s+([^\s]+)\s*`)
+	matches := moduleRegex.FindStringSubmatch(goModContent)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	// 如果匹配失败，返回默认值
+	return ""
 }
 
 // updateGoFilesForMonorepo 更新大仓模式下的go文件import路径
@@ -499,21 +572,57 @@ func updateGoFilesForMonorepo(root, oldModule, newModulePath string) error {
 
 			content := string(data)
 
-			// 解析模块路径，获取根目录名称
+			// 解析模块路径，获取根模块名称
 			parts := strings.Split(newModulePath, "/")
 			if len(parts) < 2 {
 				return fmt.Errorf("invalid module path: %s", newModulePath)
 			}
-			rootDirName := parts[0]
+			// 获取完整的根模块名称，如 github.com/sunmery/ecommerce/backend
+			var rootModuleName string
+			for i, part := range parts {
+				if part == "application" {
+					rootModuleName = strings.Join(parts[:i], "/")
+					break
+				}
+			}
+			if rootModuleName == "" {
+				// 如果没有找到application，就使用完整路径
+				rootModuleName = parts[0]
+			}
 
 			// 替换普通导入路径
 			content = strings.ReplaceAll(content, oldModule, newModulePath)
 
-			// 特殊处理api导入路径，使用根目录的api目录
-			// 将 newModulePath + "/api/" 替换为 rootDirName + "/api/"
-			apiPattern := newModulePath + "/api/"
-			apiReplacement := rootDirName + "/api/"
-			content = strings.ReplaceAll(content, apiPattern, apiReplacement)
+			// 特殊处理api导入路径
+			// API定义在根目录，不包含应用路径
+
+			// 1. 处理模板中硬编码的 root/api/ 路径
+			content = regexp.MustCompile(`"root/api/([^"]+)"`).ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
+			content = regexp.MustCompile(`root\.api\.([^\s]+)`).ReplaceAllString(content, rootModuleName+`.api.$1`)
+
+			// 2. 处理模板中硬编码的 github.com/api/ 路径
+			content = regexp.MustCompile(`"github.com/api/([^"]+)"`).ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
+			content = regexp.MustCompile(`github\.com\.api\.([^\s]+)`).ReplaceAllString(content, rootModuleName+`.api.$1`)
+
+			// 3. 处理其他可能的api导入路径格式
+			content = regexp.MustCompile(`"/api/([^"]+)"`).ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
+			content = regexp.MustCompile(`"api/([^"]+)"`).ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
+
+			// 4. 处理包含应用路径的api导入路径
+			// 例如：将 github.com/sunmery/ecommerce/backend/application/hello/api/ 替换为 github.com/sunmery/ecommerce/backend/api/
+			// 首先提取应用名称
+			appName := parts[len(parts)-1]
+			// 构建包含应用路径的api前缀
+			appApiPrefix := rootModuleName + "/application/" + appName + "/api/"
+			// 构建根目录的api前缀
+			rootApiPrefix := rootModuleName + "/api/"
+			// 替换所有包含应用路径的api导入
+			content = strings.ReplaceAll(content, appApiPrefix, rootApiPrefix)
+
+			// 5. 使用正则表达式确保所有包含应用路径的api导入都被替换
+			// 匹配格式："rootModule/application/appName/api/..."
+			appApiRegex := regexp.MustCompile(`"` + regexp.QuoteMeta(rootModuleName) + `/application/[^/]+/api/([^"]+)"`)
+			content = appApiRegex.ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
 
 			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
