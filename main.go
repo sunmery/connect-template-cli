@@ -328,7 +328,7 @@ type %sService struct {
 
 // 显式接口检查
 var _ %sconnect.%sServiceHandler = (*%sService)(nil)
-`, 
+`,
 		pbPkg, serviceNameLower, connectPkg, pathParts[len(pathParts)-3],
 		serviceName, serviceName, serviceName,
 		serviceNameLower, serviceName, serviceName,
@@ -378,8 +378,16 @@ func updateAllGoFiles(root, oldModule, newModule string) error {
 				return err
 			}
 
-			newData := strings.ReplaceAll(string(data), oldModule, newModule)
-			if err := os.WriteFile(path, []byte(newData), 0644); err != nil {
+			content := string(data)
+
+			// 修改import路径
+			content = strings.ReplaceAll(content, oldModule, newModule)
+
+			// 修改serviceName变量的默认值
+			serviceNameRegex := regexp.MustCompile(`var serviceName = flag.String\("name", "([^"]+)", "服务名称"\)`)
+			content = serviceNameRegex.ReplaceAllString(content, "var serviceName = flag.String(\"name\", \""+newModule+"\", \"服务名称\")")
+
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
 			}
 		}
@@ -390,6 +398,9 @@ func updateAllGoFiles(root, oldModule, newModule string) error {
 
 // updateProtoFiles 更新所有proto文件中的package和go_package字段
 func updateProtoFiles(root, oldModule, newModule string) error {
+	// 将服务名称中的连字符替换为下划线，用于package字段
+	protoPackageName := strings.ReplaceAll(newModule, "-", "_")
+
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -406,9 +417,9 @@ func updateProtoFiles(root, oldModule, newModule string) error {
 			// 修改go_package中的旧module名称为新名称
 			content = strings.ReplaceAll(content, oldModule, newModule)
 
-			// 修改package字段，将第一个部分替换为newModule
-			packageRegex := regexp.MustCompile(`package\s+(\w+)\.(v\d+);`)
-			content = packageRegex.ReplaceAllString(content, "package "+newModule+".$2;")
+			// 修改package字段，使用下划线替换连字符
+			packageRegex := regexp.MustCompile(`package\s+\w+\.(v\d+);`)
+			content = packageRegex.ReplaceAllString(content, "package "+protoPackageName+".$1;")
 
 			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
