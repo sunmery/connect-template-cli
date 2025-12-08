@@ -423,10 +423,6 @@ func updateAllGoFiles(root, oldModule, newModule string) error {
 			// 修改import路径
 			content = strings.ReplaceAll(content, oldModule, newModule)
 
-			// 修改serviceName变量的默认值
-			serviceNameRegex := regexp.MustCompile(`var serviceName = flag.String\("name", "([^"]+)", "服务名称"\)`)
-			content = serviceNameRegex.ReplaceAllString(content, "var serviceName = flag.String(\"name\", \""+newModule+"\", \"服务名称\")")
-
 			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
 			}
