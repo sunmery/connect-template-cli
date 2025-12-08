@@ -542,6 +542,51 @@ func handleMonorepoMode(targetPath, appPath, appName string) error {
 	}
 	fmt.Printf("Ensured main.go imports\n")
 
+	// 8. 修改Makefile，使其在--nomod模式下使用正确的buf命令
+	makefilePath := filepath.Join(targetPath, "Makefile")
+	if _, err := os.Stat(makefilePath); err == nil {
+		// 读取Makefile内容
+		makefileContent, err := os.ReadFile(makefilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read Makefile: %w", err)
+		}
+
+		// 替换api、generate和conf目标的内容
+		content := string(makefileContent)
+
+		// 替换api目标
+		content = regexp.MustCompile(`\.PHONY: api\napi:\n[\s\S]*?\n\.PHONY:`).ReplaceAllString(content, `.PHONY: api
+api:
+	# 切换到backend目录运行buf命令，确保proto文件路径在context directory内
+	cd ../../ && buf generate --template buf.gen.yaml --path api
+	cd ../../ && buf generate --template buf.gen.ts.yaml --path api
+
+.PHONY:`)
+
+		// 替换generate目标
+		content = regexp.MustCompile(`\.PHONY: generate\ngenerate:\n[\s\S]*?\n\.PHONY:`).ReplaceAllString(content, `.PHONY: generate
+generate:
+	# 切换到backend目录运行buf命令，确保proto文件路径在context directory内
+	cd ../../ && buf generate --template buf.gen.yaml --path api
+	cd ../../ && buf generate --template buf.gen.ts.yaml --path api
+
+.PHONY:`)
+
+		// 替换conf目标
+		content = regexp.MustCompile(`\.PHONY: conf\nconf:\n[\s\S]*?\n\n`).ReplaceAllString(content, `.PHONY: conf
+conf:
+	# 切换到backend目录运行buf命令，确保proto文件路径在context directory内
+	cd ../../ && buf generate --template buf.gen.yaml --path api
+
+`)
+
+		// 写回Makefile
+		if err := os.WriteFile(makefilePath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to update Makefile: %w", err)
+		}
+		fmt.Printf("Updated Makefile for monorepo mode\n")
+	}
+
 	return nil
 }
 
