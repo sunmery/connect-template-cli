@@ -117,6 +117,12 @@ func handleNewCommand() {
 			fmt.Printf("Failed to update main.go imports: %v\n", err)
 			os.Exit(1)
 		}
+
+		// 重命名所有user.go文件为appName.go
+		if err := renameUserFiles(targetPath, appName); err != nil {
+			fmt.Printf("Failed to rename user.go files: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Printf("Application %s created successfully at %s\n", appName, targetPath)
@@ -423,6 +429,12 @@ func updateAllGoFiles(root, oldModule, newModule string) error {
 			// 修改import路径
 			content = strings.ReplaceAll(content, oldModule, newModule)
 
+			// 修改NewUserRepo等函数名称为微服务名称的大写形式
+			appName := strings.Title(newModule)
+			content = strings.ReplaceAll(content, "NewUserRepo", "New"+appName+"Repo")
+			content = strings.ReplaceAll(content, "NewUserUseCase", "New"+appName+"UseCase")
+			content = strings.ReplaceAll(content, "NewUserService", "New"+appName+"Service")
+
 			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
 			}
@@ -583,6 +595,11 @@ conf:
 		fmt.Printf("Updated Makefile for monorepo mode\n")
 	}
 
+	// 重命名所有user.go文件为appName.go
+	if err := renameUserFiles(targetPath, appName); err != nil {
+		return fmt.Errorf("failed to rename user.go files: %w", err)
+	}
+
 	return nil
 }
 
@@ -665,6 +682,12 @@ func updateGoFilesForMonorepo(root, oldModule, newModulePath string) error {
 			appApiRegex := regexp.MustCompile(`"` + regexp.QuoteMeta(rootModuleName) + `/application/[^/]+/api/([^"]+)"`)
 			content = appApiRegex.ReplaceAllString(content, `"`+rootModuleName+`/api/$1"`)
 
+			// 6. 修改NewUserRepo等函数名称为微服务名称的大写形式
+			appName = strings.Title(parts[len(parts)-1])
+			content = strings.ReplaceAll(content, "NewUserRepo", "New"+appName+"Repo")
+			content = strings.ReplaceAll(content, "NewUserUseCase", "New"+appName+"UseCase")
+			content = strings.ReplaceAll(content, "NewUserService", "New"+appName+"Service")
+
 			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 				return err
 			}
@@ -708,4 +731,28 @@ func ensureMainImports(path, appName string) error {
 	}
 
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// renameUserFiles 将所有user.go文件重命名为appName.go
+func renameUserFiles(root, appName string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() && filepath.Base(path) == "user.go" {
+			// 构建新的文件路径
+			dir := filepath.Dir(path)
+			newPath := filepath.Join(dir, appName+".go")
+
+			// 重命名文件
+			if err := os.Rename(path, newPath); err != nil {
+				return fmt.Errorf("failed to rename %s to %s: %w", path, newPath, err)
+			}
+
+			fmt.Printf("Renamed %s to %s\n", path, newPath)
+		}
+
+		return nil
+	})
 }
